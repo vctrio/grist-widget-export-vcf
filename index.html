@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<!--
+  Widget Grist « Export contacts (.vcf) »
+  ---------------------------------------
+  Lit les lignes de la table à laquelle le widget est connecté et génère,
+  entièrement dans le navigateur, un fichier vCard 3.0 (.vcf) importable dans
+  Contacts (iPhone, Mac), sur icloud.com ou dans la plupart des carnets d'adresses.
+
+  - Accès demandé : « lecture de la table sélectionnée » uniquement.
+  - Aucune donnée n'est modifiée, aucun serveur n'est appelé.
+  - Les colonnes ne sont pas codées en dur : l'utilisateur les associe dans le
+    panneau de configuration du widget (mapping Grist).
+  - Interface : Pico CSS (https://picocss.com, licence MIT).
+  - Licence : MIT — voir le fichier LICENSE (© 2026 Victor Grange).
+
+  Pour ajouter / retirer un champ exporté : voir la liste FIELDS (mapping),
+  puis readContact() (lecture) et buildVCard() (écriture du vCard).
+-->
+<html lang="fr" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Export contacts (.vcf)</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.1.1/css/pico.min.css">
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <style>
+    /* Ajustements de Pico CSS pour un affichage compact dans un panneau Grist. */
+    :root {
+      --pico-font-size: 93.75%;
+      --pico-spacing: 0.75rem;
+      --pico-form-element-spacing-vertical: 0.5rem;
+      --pico-form-element-spacing-horizontal: 0.75rem;
+    }
+    body { padding: 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .compteur { font-size: 1.05rem; }
+    .compteur strong { color: var(--pico-primary); }
+    .mention { color: var(--pico-muted-color); font-size: 0.8rem; }
+    .champ { max-width: 24rem; }
+    .boutons { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: var(--pico-spacing); }
+    .boutons button { margin: 0; }
+    [hidden] { display: none !important; }
+
+    /* Messages (information, attention, succès) avec les couleurs de Pico. */
+    .alerte {
+      border-left: 4px solid var(--alerte-couleur);
+      background: var(--pico-card-sectioning-background-color);
+      padding: 0.5rem 0.75rem;
+      margin-bottom: var(--pico-spacing);
+      max-width: 40rem;
+    }
+    .alerte p { margin: 0; }
+    .alerte details { margin: 0.25rem 0 0; }
+    .alerte details ul { margin: 0.25rem 0 0; max-height: 10rem; overflow-y: auto; }
+    .alerte-info { --alerte-couleur: var(--pico-primary); }
+    .alerte-attention { --alerte-couleur: var(--pico-del-color); }
+    .alerte-succes { --alerte-couleur: var(--pico-ins-color); }
+
+    /* Zone de filtre (cases à cocher) */
+    fieldset.filtre {
+      border: 1px solid var(--pico-muted-border-color);
+      border-radius: var(--pico-border-radius);
+      padding: 0.5rem 1rem 0.75rem;
+      max-width: 40rem;
+    }
+    fieldset.filtre legend { font-weight: 700; padding: 0 0.25rem; }
+    .filtre-actions { display: flex; gap: 1rem; margin-bottom: 0.5rem; }
+    .btn-lien {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      width: auto;
+      color: var(--pico-primary);
+      text-decoration: underline;
+      font-size: 0.85rem;
+    }
+    .filtre-liste { max-height: 16rem; overflow-y: auto; }
+    .case { margin-bottom: 0.25rem; cursor: pointer; }
+    .case .nb { color: var(--pico-muted-color); margin-left: 0.25rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Exporter les contacts</h1>
+    <p class="compteur" id="compteur" aria-live="polite">Chargement des données…</p>
+
+    <!-- Message affiché tant que la colonne obligatoire n'est pas associée -->
+    <div class="alerte alerte-info" id="alerte-mapping" hidden>
+      <p><strong>Configuration nécessaire.</strong>
+        Dans le panneau de droite de Grist (onglet du widget), associez au minimum la
+        colonne <em>Nom</em>, puis les autres champs disponibles (prénom, téléphone, email…).</p>
+    </div>
+
+    <!-- Filtre : affiché seulement si le champ « Critère de filtre » est associé -->
+    <fieldset class="filtre" id="filtre" hidden>
+      <legend>Filtrer les contacts</legend>
+      <div class="filtre-actions">
+        <button type="button" class="btn-lien" id="btn-cocher">Tout cocher</button>
+        <button type="button" class="btn-lien" id="btn-decocher">Tout décocher</button>
+      </div>
+      <div class="filtre-liste" id="filtre-liste"></div>
+    </fieldset>
+
+    <!-- Contacts sans téléphone ni email : exportés quand même, mais signalés -->
+    <div class="alerte alerte-attention" id="alerte-incomplets" hidden>
+      <p id="alerte-incomplets-texte"></p>
+      <details>
+        <summary>Voir la liste</summary>
+        <ul id="liste-incomplets"></ul>
+      </details>
+    </div>
+
+    <div class="champ">
+      <label for="nom-fichier">Nom du fichier</label>
+      <input type="text" id="nom-fichier" value="contacts" autocomplete="off" aria-describedby="nom-fichier-aide">
+      <small id="nom-fichier-aide">L'extension .vcf est ajoutée automatiquement.</small>
+    </div>
+
+    <div class="boutons">
+      <button type="button" id="btn-tous" disabled>
+        Télécharger les contacts (.vcf)
+      </button>
+      <button type="button" class="outline" id="btn-selection" disabled>
+        Télécharger le contact sélectionné
+      </button>
+    </div>
+
+    <div class="alerte alerte-succes" id="alerte-succes" role="status" hidden>
+      <p id="alerte-succes-texte"></p>
+    </div>
+
+    <p class="mention">
+      Pour n'exporter qu'une partie des contacts, associez une colonne au champ
+      « Critère de filtre » (catégorie, statut…) dans le panneau de configuration du widget,
+      puis cochez les valeurs voulues ci-dessus. Le fichier est créé dans votre navigateur,
+      aucune donnée n'est envoyée ailleurs.
+    </p>
+  </main>
+
+  <script>
+    'use strict';
+
+    /* ======================================================================
+     * 1. CHAMPS PROPOSÉS AU MAPPING
+     * ----------------------------------------------------------------------
+     * `name`  : identifiant interne utilisé dans ce script (ne pas renommer
+     *           sans mettre à jour readContact()).
+     * `title` : libellé affiché dans le panneau de configuration Grist.
+     * `allowMultiple` : l'utilisateur peut associer plusieurs colonnes
+     *           (ex. deux colonnes « Email » et « Email 2 »).
+     * Le type 'Any' laisse associer n'importe quel type de colonne (texte,
+     * nombre, liste de choix…) : utile pour les téléphones ou codes postaux
+     * stockés en numérique.
+     * ==================================================================== */
+    const FIELDS = [
+      { name: 'Nom',          title: 'Nom (ou nom complet)', optional: false,
+        description: 'Seul champ obligatoire. Si la table n\'a qu\'une colonne « nom complet », associez-la ici.' },
+      { name: 'Prenom',       title: 'Prénom',                       optional: true },
+      { name: 'TelMobile',    title: 'Téléphone mobile',             optional: true, allowMultiple: true },
+      { name: 'TelPro',       title: 'Téléphone professionnel',      optional: true, allowMultiple: true },
+      { name: 'TelDomicile',  title: 'Téléphone domicile',           optional: true, allowMultiple: true },
+      { name: 'Email',        title: 'Email',                        optional: true, allowMultiple: true },
+      { name: 'Organisation', title: 'Organisation',                 optional: true },
+      { name: 'Fonction',     title: 'Fonction',                     optional: true },
+      { name: 'Adresse',      title: 'Adresse (rue)',                optional: true },
+      { name: 'CodePostal',   title: 'Code postal',                  optional: true },
+      { name: 'Ville',        title: 'Ville',                        optional: true },
+      { name: 'Pays',         title: 'Pays',                         optional: true },
+      { name: 'Notes',        title: 'Notes',                        optional: true },
+      { name: 'Filtre',       title: 'Critère de filtre',            optional: true,
+        description: 'Facultatif. Colonne servant à choisir les contacts à exporter (catégorie, statut…) : ses valeurs s\'affichent en cases à cocher. Non exportée dans le fichier.' },
+    ];
+
+    // Libellé de la case regroupant les contacts sans valeur pour le critère de filtre.
+    const EMPTY_VALUE = '(vide)';
+
+    // Type d'adresse inscrit dans le vCard ('HOME' = domicile, 'WORK' = travail).
+    const ADDRESS_TYPE = 'HOME';
+
+    /* ======================================================================
+     * 2. LECTURE ET NETTOYAGE DES VALEURS GRIST
+     * ==================================================================== */
+
+    /** Convertit une valeur de cellule Grist en texte simple (chaîne vide si absente). */
+    function toText(value) {
+      if (value === null || value === undefined) return '';
+      if (Array.isArray(value)) {
+        // Liste de choix Grist encodée : ['L', 'a', 'b']
+        const items = value[0] === 'L' ? value.slice(1) : value;
+        return items.map(toText).filter(Boolean).join(', ');
+      }
+      if (value instanceof Date) return value.toLocaleDateString('fr-FR');
+      if (typeof value === 'object') return ''; // erreur de formule, référence non résolue…
+      return String(value).trim();
+    }
+
+    /**
+     * Transforme une ou plusieurs cellules en liste de valeurs distinctes.
+     * Une même cellule peut contenir plusieurs valeurs séparées par un
+     * retour à la ligne, un point-virgule, une virgule ou un « / ».
+     */
+    function toList(value, normalize) {
+      const cells = Array.isArray(value) && value[0] !== 'L' ? value : [value];
+      const out = [];
+      for (const cell of cells) {
+        let parts;
+        if (Array.isArray(cell)) parts = (cell[0] === 'L' ? cell.slice(1) : cell);
+        else if (typeof cell === 'number') parts = [cell];
+        else parts = toText(cell).split(/[\n;,\/]+/);
+        for (const p of parts) {
+          const v = normalize ? normalize(p) : toText(p);
+          if (v && !out.includes(v)) out.push(v);
+        }
+      }
+      return out;
+    }
+
+    /**
+     * Nettoie un numéro de téléphone. Si la colonne Grist est numérique, le
+     * 0 initial a disparu (612345678) : on le rajoute pour les numéros
+     * français à 9 chiffres.
+     */
+    function normalizePhone(value) {
+      if (typeof value === 'number') {
+        const digits = String(Math.trunc(value));
+        return /^[1-9]\d{8}$/.test(digits) ? '0' + digits : digits;
+      }
+      return toText(value);
+    }
+
+    /**
+     * Valeurs du critère de filtre pour un contact. Une liste de choix donne
+     * plusieurs valeurs ; un texte est découpé sur retour à la ligne ou « ; »
+     * (pas sur la virgule, pour ne pas couper des libellés).
+     */
+    function toFilterValues(value) {
+      const items = Array.isArray(value)
+        ? (value[0] === 'L' ? value.slice(1) : value)
+        : toText(value).split(/[\n;]+/);
+      const out = [];
+      for (const item of items) {
+        const v = toText(item);
+        if (v && !out.includes(v)) out.push(v);
+      }
+      return out.length ? out : [EMPTY_VALUE];
+    }
+
+    /** Convertit une ligne Grist (déjà « mappée ») en objet contact. */
+    function readContact(row) {
+      const phones = [];
+      for (const v of toList(row.TelMobile, normalizePhone))   phones.push({ type: 'CELL', value: v });
+      for (const v of toList(row.TelPro, normalizePhone))      phones.push({ type: 'WORK', value: v });
+      for (const v of toList(row.TelDomicile, normalizePhone)) phones.push({ type: 'HOME', value: v });
+
+      return {
+        nom: toText(row.Nom),
+        prenom: toText(row.Prenom),
+        phones,
+        emails: toList(row.Email),
+        organisation: toText(row.Organisation),
+        fonction: toText(row.Fonction),
+        adresse: toText(row.Adresse),
+        codePostal: toText(row.CodePostal),
+        ville: toText(row.Ville),
+        pays: toText(row.Pays),
+        notes: toText(row.Notes),
+        filterValues: toFilterValues(row.Filtre),
+      };
+    }
+
+    /** Nom affiché du contact (FN), avec repli si le nom est absent. */
+    function displayName(c) {
+      const full = [c.prenom, c.nom].filter(Boolean).join(' ');
+      return full || c.organisation || c.emails[0] || (c.phones[0] && c.phones[0].value) || '';
+    }
+
+    /** Ligne vide ou presque : rien d'utile à exporter. */
+    function isEmpty(c) {
+      return !c.nom && !c.prenom && !c.organisation && !c.phones.length && !c.emails.length;
+    }
+
+    /** Contact exportable mais sans moyen de le joindre. */
+    function isUnreachable(c) {
+      return !c.phones.length && !c.emails.length;
+    }
+
+    /* ======================================================================
+     * 3. GÉNÉRATION DU vCard 3.0
+     * ==================================================================== */
+
+    /** Échappe une valeur selon la norme vCard (\ ; , et retours à la ligne). */
+    function esc(value) {
+      return String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/;/g, '\\;')
+        .replace(/,/g, '\\,')
+        .replace(/\r\n|\r|\n/g, '\\n');
+    }
+
+    /**
+     * Coupe les lignes de plus de 75 octets (règle vCard) : la suite est
+     * renvoyée à la ligne et précédée d'un espace. Le découpage se fait sur
+     * des caractères entiers pour ne jamais casser un accent (UTF-8).
+     */
+    const encoder = new TextEncoder();
+    function fold(line) {
+      if (encoder.encode(line).length <= 75) return line;
+      const parts = [];
+      let current = '';
+      let bytes = 0;
+      let limit = 75;
+      for (const ch of line) {
+        const size = encoder.encode(ch).length;
+        if (bytes + size > limit) {
+          parts.push(current);
+          current = '';
+          bytes = 0;
+          limit = 74; // les lignes de suite commencent par un espace
+        }
+        current += ch;
+        bytes += size;
+      }
+      parts.push(current);
+      return parts.join('\r\n ');
+    }
+
+    /** Construit le texte vCard d'un contact. */
+    function buildVCard(c) {
+      const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+
+      // N (obligatoire en 3.0) : Nom;Prénom;;;   FN : nom affiché
+      lines.push(`N:${esc(c.nom)};${esc(c.prenom)};;;`);
+      lines.push(`FN:${esc(displayName(c))}`);
+      // Sans nom ni prénom, l'iPhone affiche la fiche comme une entreprise.
+      if (!c.nom && !c.prenom && c.organisation) lines.push('X-ABShowAs:COMPANY');
+
+      if (c.organisation) lines.push(`ORG:${esc(c.organisation)}`);
+      if (c.fonction) lines.push(`TITLE:${esc(c.fonction)}`);
+
+      for (const p of c.phones) lines.push(`TEL;TYPE=${p.type},VOICE:${esc(p.value)}`);
+      for (const e of c.emails) lines.push(`EMAIL;TYPE=INTERNET:${esc(e)}`);
+
+      if (c.adresse || c.codePostal || c.ville || c.pays) {
+        // ADR : boîte postale;complément;rue;ville;région;code postal;pays
+        lines.push(`ADR;TYPE=${ADDRESS_TYPE}:;;${esc(c.adresse)};${esc(c.ville)};;${esc(c.codePostal)};${esc(c.pays)}`);
+      }
+
+      if (c.notes) lines.push(`NOTE:${esc(c.notes)}`);
+      lines.push('END:VCARD');
+      return lines.map(fold).join('\r\n') + '\r\n';
+    }
+
+    /** Assemble plusieurs vCards dans un seul fichier. */
+    function buildVcf(contacts) {
+      return contacts.map(buildVCard).join('');
+    }
+
+    /* ======================================================================
+     * 4. TÉLÉCHARGEMENT (100 % navigateur)
+     * ==================================================================== */
+
+    function sanitizeFilename(name, fallback) {
+      const clean = String(name || '').replace(/\.vcf$/i, '').replace(/[\\\/:*?"<>|]+/g, '').trim();
+      return (clean || fallback) + '.vcf';
+    }
+
+    function downloadFile(content, filename) {
+      const blob = new Blob([content], { type: 'text/vcard;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Libération différée : une révocation immédiate peut interrompre le téléchargement sur Safari.
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    /* ======================================================================
+     * 5. ÉTAT DU WIDGET ET AFFICHAGE
+     * ==================================================================== */
+
+    const state = {
+      allContacts: [],     // contacts exportables (lignes vides exclues), avant filtre
+      emptyRows: 0,        // lignes ignorées
+      mappingOk: false,
+      filterEnabled: false, // vrai si le champ « Critère de filtre » est associé
+      excluded: new Set(), // valeurs décochées (les nouvelles valeurs arrivent donc cochées)
+      selected: null,      // contact de la ligne sélectionnée dans Grist
+    };
+
+    /** Contacts retenus par le filtre : au moins une de leurs valeurs est cochée. */
+    function selectedContacts() {
+      if (!state.filterEnabled) return state.allContacts;
+      return state.allContacts.filter((c) => c.filterValues.some((v) => !state.excluded.has(v)));
+    }
+
+    const $ = (id) => document.getElementById(id);
+    const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+
+    /** (Re)construit la liste des cases à cocher à partir des données reçues. */
+    function renderFilter() {
+      $('filtre').hidden = !state.mappingOk || !state.filterEnabled;
+      if ($('filtre').hidden) return;
+
+      const counts = new Map();
+      for (const c of state.allContacts) {
+        for (const v of c.filterValues) counts.set(v, (counts.get(v) || 0) + 1);
+      }
+      const values = [...counts.keys()].sort((a, b) =>
+        a === EMPTY_VALUE ? 1 : b === EMPTY_VALUE ? -1 : a.localeCompare(b, 'fr', { numeric: true }));
+
+      $('filtre-liste').replaceChildren(...values.map((v) => {
+        const label = document.createElement('label');
+        label.className = 'case';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = v;
+        input.checked = !state.excluded.has(v);
+        const text = document.createElement('span');
+        text.textContent = v;
+        const nb = document.createElement('span');
+        nb.className = 'nb';
+        nb.textContent = `(${counts.get(v)})`;
+        label.append(input, text, nb);
+        return label;
+      }));
+    }
+
+    function render() {
+      $('alerte-mapping').hidden = state.mappingOk;
+
+      const contacts = selectedContacts();
+      const unreachable = contacts.filter(isUnreachable);
+
+      if (!state.mappingOk) {
+        $('compteur').textContent = 'Aucune colonne associée pour le moment.';
+      } else {
+        const n = contacts.length;
+        let text = state.filterEnabled
+          ? `${plural(n, 'contact sélectionné', 'contacts sélectionnés')} sur ${state.allContacts.length}.`
+          : `${plural(n, 'contact prêt', 'contacts prêts')} à être exporté${n > 1 ? 's' : ''}.`;
+        if (state.emptyRows) text += ` (${plural(state.emptyRows, 'ligne vide ignorée', 'lignes vides ignorées')})`;
+        $('compteur').innerHTML = text.replace(/^(\d+)/, '<strong>$1</strong>');
+      }
+
+      const n = unreachable.length;
+      $('alerte-incomplets').hidden = !state.mappingOk || n === 0;
+      if (n) {
+        $('alerte-incomplets-texte').textContent =
+          `${plural(n, 'contact n\'a', 'contacts n\'ont')} ni téléphone ni email. ` +
+          `${n > 1 ? 'Ils seront' : 'Il sera'} quand même exporté${n > 1 ? 's' : ''}.`;
+        const ul = $('liste-incomplets');
+        ul.replaceChildren(...unreachable.map((c) => {
+          const li = document.createElement('li');
+          li.textContent = displayName(c) || '(sans nom)';
+          return li;
+        }));
+      }
+
+      $('btn-tous').disabled = !state.mappingOk || contacts.length === 0;
+
+      const sel = $('btn-selection');
+      sel.disabled = !state.selected;
+      sel.textContent = state.selected
+        ? `Télécharger le contact sélectionné (${displayName(state.selected) || 'sans nom'})`
+        : 'Télécharger le contact sélectionné';
+    }
+
+    function showSuccess(message) {
+      $('alerte-succes-texte').textContent = message;
+      $('alerte-succes').hidden = false;
+    }
+
+    /* ======================================================================
+     * 6. BRANCHEMENT À GRIST
+     * ==================================================================== */
+
+    grist.ready({
+      requiredAccess: 'read table',
+      columns: FIELDS.map((f) => ({ type: 'Any', ...f })),
+    });
+
+    // Toutes les lignes visibles du widget (filtres du widget appliqués).
+    grist.onRecords((records, mappings) => {
+      const rows = records.map((r) => grist.mapColumnNames(r, { mappings }));
+      state.mappingOk = rows.length === 0 ? Boolean(mappings && mappings.Nom) : rows.every(Boolean);
+      state.filterEnabled = Boolean(mappings && mappings.Filtre);
+      state.allContacts = [];
+      state.emptyRows = 0;
+      if (state.mappingOk) {
+        for (const row of rows) {
+          const c = readContact(row);
+          if (isEmpty(c)) { state.emptyRows++; continue; }
+          state.allContacts.push(c);
+        }
+      }
+      $('alerte-succes').hidden = true;
+      renderFilter();
+      render();
+    });
+
+    // Ligne actuellement sélectionnée dans Grist (curseur).
+    grist.onRecord((record, mappings) => {
+      const row = record && grist.mapColumnNames(record, { mappings });
+      const c = row ? readContact(row) : null;
+      state.selected = c && !isEmpty(c) ? c : null;
+      render();
+    });
+
+    /* ======================================================================
+     * 7. ACTIONS DE L'UTILISATEUR
+     * ==================================================================== */
+
+    // Case cochée / décochée : on met à jour la sélection sans reconstruire la liste.
+    $('filtre-liste').addEventListener('change', (event) => {
+      const input = event.target;
+      if (input.checked) state.excluded.delete(input.value);
+      else state.excluded.add(input.value);
+      $('alerte-succes').hidden = true;
+      render();
+    });
+
+    function setAllChecked(checked) {
+      for (const input of $('filtre-liste').querySelectorAll('input[type="checkbox"]')) {
+        input.checked = checked;
+        if (checked) state.excluded.delete(input.value);
+        else state.excluded.add(input.value);
+      }
+      $('alerte-succes').hidden = true;
+      render();
+    }
+    $('btn-cocher').addEventListener('click', () => setAllChecked(true));
+    $('btn-decocher').addEventListener('click', () => setAllChecked(false));
+
+    $('btn-tous').addEventListener('click', () => {
+      const contacts = selectedContacts();
+      const filename = sanitizeFilename($('nom-fichier').value, 'contacts');
+      downloadFile(buildVcf(contacts), filename);
+      showSuccess(`${plural(contacts.length, 'contact exporté', 'contacts exportés')} avec succès dans « ${filename} ».`);
+    });
+
+    $('btn-selection').addEventListener('click', () => {
+      if (!state.selected) return;
+      const filename = sanitizeFilename(displayName(state.selected), 'contact');
+      downloadFile(buildVCard(state.selected), filename);
+      showSuccess(`Contact exporté avec succès dans « ${filename} ».`);
+    });
+  </script>
+</body>
+</html>
