@@ -4,25 +4,19 @@ Génère un fichier `contacts.vcf` (vCard 3.0) à partir d'une table Grist, impo
 Contacts (iPhone / Mac) ou sur icloud.com. Tout se passe dans le navigateur : pas de
 serveur, aucune donnée modifiée, accès demandé = lecture de la table seulement.
 
-## Utilisation par lien (le plus simple)
+## Installation
+
+Rien à installer ni à copier : il suffit de coller un lien dans Grist.
 
 1. Dans le document Grist : **Ajouter un widget** → **Personnalisé** → table des contacts.
 2. Dans le panneau de droite, choisir **URL personnalisée** et coller :
    `https://vctrio.github.io/grist-widget-export-vcf/`
 3. Accorder l'accès **« Lire la table sélectionnée »**.
-4. Associer les colonnes (seul **Nom** est obligatoire).
+4. Associer les colonnes. Seul **Nom** est obligatoire (y mettre la colonne « nom complet »
+   si la table n'a pas de colonne prénom séparée). Téléphones et emails acceptent
+   plusieurs colonnes.
 
 Le widget se met à jour automatiquement quand une nouvelle version est publiée ici.
-
-## Installation par copier-coller (Custom Widget Builder)
-
-1. Dans le document Grist : **Ajouter un widget** → **Personnalisé** → table des contacts.
-2. Choisir **Custom Widget Builder**, coller tout le contenu de `index.html` dans l'onglet
-   HTML (l'onglet JavaScript reste vide), puis **Enregistrer / Prévisualiser**.
-3. Accorder l'accès **« Lire la table sélectionnée »**.
-4. Dans le panneau de droite, associer les colonnes. Seul **Nom** est obligatoire
-   (y mettre la colonne « nom complet » si la table n'a pas de colonne prénom séparée).
-   Téléphones et emails acceptent plusieurs colonnes.
 
 ## Utilisation
 
